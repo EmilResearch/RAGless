@@ -1,0 +1,16 @@
+# Ambienti virtuali
+venv/
+env/
+
+# File di configurazione locale
+.env
+
+# Dati locali e log generati dagli script
+data.json
+qdrant_data/
+failed_chunks/
+missed_queries.log
+
+# Cache Python
+__pycache__/
+*.pyc
