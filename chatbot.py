@@ -1,17 +1,17 @@
 """
 chatbot.py
 ----------
-Script 3 — CLI Chatbot con Top-K Aggregation.
+Script 3 — CLI Chatbot with Top-K Aggregation.
 
-Caratteristiche chiave:
-  * Nessun LLM al runtime: zero allucinazioni, latenza minima, costo prossimo a zero.
-  * Aggregazione degli score per `answer_id`: se più varianti di domanda
-    della stessa risposta matchano la query, i loro score si sommano,
-    rendendo il vincitore molto più robusto rispetto al singolo top-1.
-  * Soglia OOD configurabile via --threshold.
-  * Log automatico delle query "missed" su missed_queries.log.
+Key features:
+  * No LLM at runtime: zero hallucinations, minimal latency, near-zero cost.
+  * Score aggregation by `answer_id`: if multiple question variants for the
+    same answer match the query, their scores are summed, making the winner
+    much more robust than relying on the single top-1 hit.
+  * OOD threshold configurable via --threshold.
+  * Automatic logging of "missed" queries to missed_queries.log.
 
-Uso:
+Usage:
     python chatbot.py
     python chatbot.py --threshold 0.75
 """
@@ -41,7 +41,7 @@ import config
 load_dotenv()
 
 if not os.getenv("GEMINI_API_KEY"):
-    print("[ERROR] GEMINI_API_KEY non trovata. Copia .env.example in .env e inserisci la chiave.")
+    print("[ERROR] GEMINI_API_KEY not found. Copy .env.example to .env and set the key.")
     sys.exit(1)
 
 litellm.suppress_debug_info = True
@@ -51,10 +51,10 @@ litellm.suppress_debug_info = True
 # Helpers
 # -----------------------------------------------------------------------------
 def load_answers_dict(path: str) -> dict[str, dict]:
-    """Carica data.json e costruisce un dict id -> blocco per lookup O(1)."""
+    """Load data.json and build an id -> block dict for O(1) lookup."""
     p = Path(path)
     if not p.exists():
-        print(f"[ERROR] {path} non trovato. Esegui prima `prepare_data.py` e `ingest_to_qdrant.py`.")
+        print(f"[ERROR] {path} not found. Run `prepare_data.py` and `ingest_to_qdrant.py` first.")
         sys.exit(1)
     with open(p, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -62,32 +62,44 @@ def load_answers_dict(path: str) -> dict[str, dict]:
 
 
 def embed_query(query: str) -> list[float]:
-    """Embedding singolo per la query utente."""
+    """
+    Single embedding for the user query.
+
+    Uses task_type=RETRIEVAL_QUERY (asymmetric with the RETRIEVAL_DOCUMENT
+    task type used at ingestion time): this is the recommended setup for
+    Gemini embeddings and gives noticeably better retrieval quality.
+    """
     resp = embedding(
         model=config.EMBEDDING_MODEL,
         input=[query],
         num_retries=config.LITELLM_NUM_RETRIES,
+        task_type=config.EMBED_TASK_TYPE_QUERY,
+        output_dimensionality=config.VECTOR_SIZE,
     )
     return resp["data"][0]["embedding"]
 
 
 def log_missed_query(query: str, top_score: float) -> None:
-    """Append-only log delle query sotto soglia."""
+    """Append-only log of below-threshold queries."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     line = f"{ts}\tscore={top_score:.4f}\tquery={query}\n"
-    with open(config.MISSED_QUERIES_LOG, "a", encoding="utf-8") as f:
-        f.write(line)
+    try:
+        with open(config.MISSED_QUERIES_LOG, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError as e:
+        # Logging must never crash the chatbot loop.
+        print(f"[WARN] Could not write missed-query log: {e}")
 
 
 def aggregate_scores(search_results) -> dict[str, dict]:
     """
-    Aggrega gli score dei Top-K risultati Qdrant per `answer_id`.
+    Aggregate scores of the Top-K Qdrant results by `answer_id`.
 
-    Ritorna un dict:
+    Returns a dict:
       { answer_id: {
-            "score": float (somma),
-            "hits": int (numero di varianti che hanno matchato),
-            "best_question": str (la variante con lo score singolo più alto),
+            "score": float (sum),
+            "hits": int (number of matching variants),
+            "best_question": str (the variant with the highest single score),
             "best_single_score": float
         }, ... }
     """
@@ -104,10 +116,11 @@ def aggregate_scores(search_results) -> dict[str, dict]:
         if not aid:
             continue
         bucket = agg[aid]
-        bucket["score"] += float(r.score)
+        score = float(r.score)
+        bucket["score"] += score
         bucket["hits"] += 1
-        if r.score > bucket["best_single_score"]:
-            bucket["best_single_score"] = float(r.score)
+        if score > bucket["best_single_score"]:
+            bucket["best_single_score"] = score
             bucket["best_question"] = payload.get("question_text", "")
 
     return agg
@@ -123,81 +136,95 @@ def answer_query(
     threshold: float,
     debug: bool = False,
 ) -> None:
-    """Esegue il retrieval + aggregazione e stampa la risposta."""
+    """Run retrieval + aggregation and print the answer."""
     try:
         qvec = embed_query(query)
     except Exception as e:
-        print(f"[ERROR] Embedding fallito: {e}")
+        print(f"[ERROR] Embedding failed: {e}")
         return
 
-    results = client.query_points(
-        collection_name=config.COLLECTION_NAME,
-        query=qvec,
-        limit=config.TOP_K_RETRIEVAL,
-        with_payload=True,
-    ).points
-    
+    try:
+        results = client.query_points(
+            collection_name=config.COLLECTION_NAME,
+            query=qvec,
+            limit=config.TOP_K_RETRIEVAL,
+            with_payload=True,
+        ).points
+    except Exception as e:
+        print(f"[ERROR] Qdrant query failed: {e}")
+        return
+
     if not results:
-        print("\nNon ho trovato informazioni pertinenti.")
+        print("\nI couldn't find any relevant information.")
         log_missed_query(query, 0.0)
         return
 
     agg = aggregate_scores(results)
     if not agg:
-        print("\nNon ho trovato informazioni pertinenti.")
+        print("\nI couldn't find any relevant information.")
         log_missed_query(query, 0.0)
         return
 
-    # Vincitore = answer_id con score AGGREGATO più alto
+    # Winner = answer_id with the highest AGGREGATED score.
     winner_id, winner = max(agg.items(), key=lambda kv: kv[1]["score"])
     top_agg_score = winner["score"]
+    top_single_score = winner["best_single_score"]
 
     if debug:
         print("\n--- DEBUG TOP-K ---")
         for r in results:
-            print(f"  score={r.score:.4f}  aid={r.payload.get('answer_id')}  q={r.payload.get('question_text')}")
+            payload = r.payload or {}
+            print(f"  score={r.score:.4f}  aid={payload.get('answer_id')}  q={payload.get('question_text')}")
         print("--- DEBUG AGG ---")
         for aid, b in sorted(agg.items(), key=lambda kv: -kv[1]["score"]):
             print(f"  aid={aid}  agg={b['score']:.4f}  hits={b['hits']}  best_single={b['best_single_score']:.4f}")
         print("-------------------")
 
-    # Controllo soglia sullo score AGGREGATO (non sul singolo top-1)
-    if top_agg_score < threshold:
-        print("\nNon ho trovato informazioni pertinenti su questo argomento nella mia base di conoscenza.")
+    # Threshold check.
+    # Primary gate: aggregated score must clear `threshold`.
+    # Fallback: a very strong single hit (>= SINGLE_HIT_THRESHOLD) also passes,
+    # so we don't reject a clearly-correct answer just because only one of its
+    # question variants made it into the top-K.
+    passes_agg = top_agg_score >= threshold
+    passes_single = top_single_score >= config.SINGLE_HIT_THRESHOLD
+
+    if not (passes_agg or passes_single):
+        print("\nI couldn't find any relevant information on this topic in my knowledge base.")
         log_missed_query(query, top_agg_score)
         return
 
     block = answers_dict.get(winner_id)
     if not block:
-        # Caso patologico: l'answer_id in Qdrant non esiste più in data.json
-        print("\n[WARN] answer_id non trovato nel document store. Ri-esegui l'ingestion.")
+        # Pathological case: the answer_id stored in Qdrant no longer exists in data.json.
+        print("\n[WARN] answer_id not found in the document store. Re-run the ingestion.")
         log_missed_query(query, top_agg_score)
         return
 
     print("\n" + "─" * 70)
-    print(block["risposta"])
+    print(block["answer"])
     print("─" * 70)
-    print(f"Fonte: {block.get('source_file', 'n/d')}")
+    print(f"Source: {block.get('source_file', 'n/a')}")
     if debug:
-        print(f"[debug] score_aggregato={top_agg_score:.4f}  hits={winner['hits']}  "
-              f"best_single={winner['best_single_score']:.4f}")
+        print(f"[debug] agg_score={top_agg_score:.4f}  hits={winner['hits']}  "
+              f"best_single={top_single_score:.4f}  passed_via="
+              f"{'agg' if passes_agg else 'single'}")
 
 
 # -----------------------------------------------------------------------------
 # CLI Loop
 # -----------------------------------------------------------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CLI chatbot Q-Q matching su Qdrant locale.")
+    parser = argparse.ArgumentParser(description="CLI chatbot, Q-Q matching on local Qdrant.")
     parser.add_argument(
         "--threshold",
         type=float,
         default=config.DEFAULT_THRESHOLD,
-        help=f"Soglia minima sullo score aggregato (default: {config.DEFAULT_THRESHOLD})",
+        help=f"Minimum aggregated-score threshold (default: {config.DEFAULT_THRESHOLD})",
     )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Mostra dettagli interni (Top-K e tabella di aggregazione).",
+        help="Show internal details (Top-K and aggregation table).",
     )
     args = parser.parse_args()
 
@@ -207,35 +234,40 @@ def main() -> None:
     print(f"  Qdrant path     : {config.QDRANT_PATH}")
     print(f"  Collection      : {config.COLLECTION_NAME}")
     print(f"  Top-K           : {config.TOP_K_RETRIEVAL}")
-    print(f"  Threshold       : {args.threshold}")
+    print(f"  Threshold (agg) : {args.threshold}")
+    print(f"  Threshold (sgl) : {config.SINGLE_HIT_THRESHOLD}")
     print(f"  Debug           : {args.debug}")
     print("=" * 70)
-    print("Scrivi una domanda. Digita 'exit' o 'quit' per uscire.\n")
+    print("Type your question. Type 'exit' or 'quit' to leave.\n")
 
     answers_dict = load_answers_dict(config.DATA_JSON)
     client = QdrantClient(path=config.QDRANT_PATH)
 
-    # Sanity check: la collection esiste?
+    # Sanity check: does the collection exist?
     try:
         info = client.get_collection(config.COLLECTION_NAME)
-        print(f"[INFO] Collection ok — {info.points_count} punti caricati.\n")
+        print(f"[INFO] Collection ok — {info.points_count} points loaded.\n")
     except Exception:
-        print(f"[ERROR] Collection '{config.COLLECTION_NAME}' non trovata. "
-              f"Esegui prima `python ingest_to_qdrant.py`.")
+        print(f"[ERROR] Collection '{config.COLLECTION_NAME}' not found. "
+              f"Run `python ingest_to_qdrant.py` first.")
+        try:
+            client.close()
+        except Exception:
+            pass
         sys.exit(1)
 
     try:
         while True:
             try:
-                query = input("Tu> ").strip()
+                query = input("You> ").strip()
             except (EOFError, KeyboardInterrupt):
-                print("\nA presto!")
+                print("\nGoodbye!")
                 break
 
             if not query:
                 continue
             if query.lower() in {"exit", "quit", ":q"}:
-                print("A presto!")
+                print("Goodbye!")
                 break
 
             answer_query(
@@ -247,7 +279,7 @@ def main() -> None:
             )
             print()
     finally:
-        # Qdrant in modalità locale tiene un lockfile: chiusura esplicita
+        # Qdrant local mode keeps a lockfile: explicit close on exit.
         try:
             client.close()
         except Exception:

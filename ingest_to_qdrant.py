@@ -1,19 +1,20 @@
 """
 ingest_to_qdrant.py
 -------------------
-Script 2 — Embedding in batch e popolamento del Vector DB (Qdrant locale).
+Script 2 — Batch embedding and Vector DB population (local Qdrant).
 
 Pipeline:
-  1. Legge `data.json`.
-  2. "Esplode" tutte le domande di tutti i blocchi mantenendo il riferimento
-     all'answer_id (id del blocco) e alla category.
-  3. Genera gli embedding in batch (EMBEDDING_BATCH_SIZE per chiamata).
-  4. (Re)crea la collection Qdrant e fa upsert di tutti i vettori.
+  1. Reads `data.json`.
+  2. "Explodes" every question of every block while keeping a reference
+     to the answer_id (the block id) and the category.
+  3. Generates embeddings in batches (EMBEDDING_BATCH_SIZE per call) using
+     the RETRIEVAL_DOCUMENT task type (asymmetric embeddings).
+  4. (Re)creates the Qdrant collection and upserts every vector.
 
-Idempotenza: ad ogni esecuzione la collection viene ricreata da zero,
-così non si accumulano duplicati nascosti.
+Idempotency: on every run the collection is recreated from scratch,
+so hidden duplicates never accumulate.
 
-Uso:
+Usage:
     python ingest_to_qdrant.py
 """
 
@@ -42,7 +43,7 @@ import config
 load_dotenv()
 
 if not os.getenv("GEMINI_API_KEY"):
-    print("[ERROR] GEMINI_API_KEY non trovata. Copia .env.example in .env e inserisci la chiave.")
+    print("[ERROR] GEMINI_API_KEY not found. Copy .env.example to .env and set the key.")
     sys.exit(1)
 
 litellm.suppress_debug_info = True
@@ -52,17 +53,17 @@ litellm.suppress_debug_info = True
 # Helpers
 # -----------------------------------------------------------------------------
 def load_data(path: str) -> list[dict]:
-    """Carica data.json e fa validazione minima."""
+    """Load data.json and do minimal validation."""
     p = Path(path)
     if not p.exists():
-        print(f"[ERROR] {path} non trovato. Esegui prima `python prepare_data.py`.")
+        print(f"[ERROR] {path} not found. Run `python prepare_data.py` first.")
         sys.exit(1)
 
     with open(p, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     if not isinstance(data, list) or not data:
-        print(f"[ERROR] {path} vuoto o non valido.")
+        print(f"[ERROR] {path} is empty or invalid.")
         sys.exit(1)
 
     return data
@@ -70,12 +71,14 @@ def load_data(path: str) -> list[dict]:
 
 def explode_questions(blocks: list[dict]) -> list[dict]:
     """
-    Espande ogni blocco nelle sue varianti di domanda, mantenendo
-    il riferimento al blocco padre (answer_id).
+    Expand every block into its question variants, keeping a back-reference
+    to the parent block (answer_id).
     """
     rows = []
     for block in blocks:
-        for q in block.get("domande", []):
+        for q in block.get("questions", []):
+            if not isinstance(q, str):
+                continue
             q = q.strip()
             if not q:
                 continue
@@ -90,8 +93,12 @@ def explode_questions(blocks: list[dict]) -> list[dict]:
 
 def embed_in_batches(texts: list[str], batch_size: int) -> list[list[float]]:
     """
-    Genera gli embedding in batch usando LiteLLM.
-    L'ordine dei vettori restituiti corrisponde all'ordine dei testi in input.
+    Generate embeddings in batches using LiteLLM.
+    The order of the returned vectors matches the order of the input texts.
+
+    We use the RETRIEVAL_DOCUMENT task type for ingestion, and at query time
+    the chatbot uses RETRIEVAL_QUERY. This asymmetric setup is the recommended
+    way to use Gemini embeddings and improves retrieval quality noticeably.
     """
     vectors: list[list[float]] = []
     n = len(texts)
@@ -102,13 +109,16 @@ def embed_in_batches(texts: list[str], batch_size: int) -> list[list[float]]:
             model=config.EMBEDDING_MODEL,
             input=batch,
             num_retries=config.LITELLM_NUM_RETRIES,
+            # Gemini-specific kwargs forwarded by LiteLLM.
+            task_type=config.EMBED_TASK_TYPE_DOCUMENT,
+            output_dimensionality=config.VECTOR_SIZE,
         )
-        # LiteLLM normalizza l'output OpenAI-style: resp["data"] è una lista di dict
-        # con chiave "embedding". L'ordine è garantito uguale all'input.
+        # LiteLLM normalizes the output OpenAI-style: resp["data"] is a list of
+        # dicts with key "embedding". The order is guaranteed to match the input.
         batch_vecs = [item["embedding"] for item in resp["data"]]
         if len(batch_vecs) != len(batch):
             raise RuntimeError(
-                f"Mismatch lunghezza batch embedding: atteso {len(batch)}, ricevuto {len(batch_vecs)}"
+                f"Embedding batch length mismatch: expected {len(batch)}, got {len(batch_vecs)}"
             )
         vectors.extend(batch_vecs)
 
@@ -116,11 +126,11 @@ def embed_in_batches(texts: list[str], batch_size: int) -> list[list[float]]:
 
 
 def create_collection(client: QdrantClient) -> None:
-    """Ricrea la collection da zero — idempotenza garantita."""
-    # Usa i nuovi metodi per evitare il DeprecationWarning
+    """Recreate the collection from scratch — idempotency guaranteed."""
+    # Use the new methods to avoid the DeprecationWarning.
     if client.collection_exists(config.COLLECTION_NAME):
         client.delete_collection(config.COLLECTION_NAME)
-        
+
     client.create_collection(
         collection_name=config.COLLECTION_NAME,
         vectors_config=qmodels.VectorParams(
@@ -128,16 +138,23 @@ def create_collection(client: QdrantClient) -> None:
             distance=qmodels.Distance.COSINE,
         ),
     )
-    print(f"[INFO] Collection '{config.COLLECTION_NAME}' ricreata "
+    print(f"[INFO] Collection '{config.COLLECTION_NAME}' recreated "
           f"(size={config.VECTOR_SIZE}, distance=COSINE).")
-          
-          
+
+
 def upsert_points(client: QdrantClient, rows: list[dict], vectors: list[list[float]]) -> None:
-    """Inserisce ogni domanda (con il suo embedding) come punto separato."""
+    """Insert every question (with its embedding) as a separate point."""
+    if len(rows) != len(vectors):
+        raise RuntimeError(
+            f"Row/vector count mismatch: {len(rows)} rows vs {len(vectors)} vectors"
+        )
+
     points = []
     for row, vec in zip(rows, vectors):
         points.append(
             qmodels.PointStruct(
+                # Deterministic UUID5: re-running ingest produces the same id
+                # for the same (answer_id, question_text) pair.
                 id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{row['answer_id']}:{row['question_text']}")),
                 vector=vec,
                 payload={
@@ -149,12 +166,12 @@ def upsert_points(client: QdrantClient, rows: list[dict], vectors: list[list[flo
             )
         )
 
-    # Upsert in batch per non saturare la memoria su collection grandi
-    BATCH = 256
-    for start in tqdm(range(0, len(points), BATCH), desc="Upserting", unit="batch"):
+    # Upsert in batches to avoid saturating memory on large collections.
+    batch = config.QDRANT_UPSERT_BATCH
+    for start in tqdm(range(0, len(points), batch), desc="Upserting", unit="batch"):
         client.upsert(
             collection_name=config.COLLECTION_NAME,
-            points=points[start:start + BATCH],
+            points=points[start:start + batch],
             wait=True,
         )
 
@@ -173,30 +190,37 @@ def main() -> None:
     print("=" * 70)
 
     blocks = load_data(config.DATA_JSON)
-    print(f"\n[INFO] Blocchi caricati: {len(blocks)}")
+    print(f"\n[INFO] Blocks loaded: {len(blocks)}")
 
     rows = explode_questions(blocks)
     if not rows:
-        print("[ERROR] Nessuna domanda trovata nei blocchi.")
+        print("[ERROR] No questions found in the blocks.")
         sys.exit(1)
-    print(f"[INFO] Domande totali da embeddare: {len(rows)}")
+    print(f"[INFO] Total questions to embed: {len(rows)}")
 
     texts = [r["question_text"] for r in rows]
-    print(f"[INFO] Avvio embedding in batch da {config.EMBEDDING_BATCH_SIZE}...")
+    print(f"[INFO] Starting embedding in batches of {config.EMBEDDING_BATCH_SIZE}...")
     vectors = embed_in_batches(texts, batch_size=config.EMBEDDING_BATCH_SIZE)
-    print(f"[INFO] Embedding generati: {len(vectors)}")
+    print(f"[INFO] Embeddings generated: {len(vectors)}")
 
-    # Inizializza Qdrant in modalità locale (path su disco, no server richiesto)
+    # Initialize Qdrant in local mode (on-disk path, no server required).
     client = QdrantClient(path=config.QDRANT_PATH)
-    create_collection(client)
-    upsert_points(client, rows, vectors)
+    try:
+        create_collection(client)
+        upsert_points(client, rows, vectors)
 
-    # Verifica
-    info = client.get_collection(config.COLLECTION_NAME)
-    print("\n" + "=" * 70)
-    print(f"COMPLETATO. Punti in collection: {info.points_count}")
-    print(f"Qdrant data: {config.QDRANT_PATH}")
-    print("=" * 70)
+        # Verification
+        info = client.get_collection(config.COLLECTION_NAME)
+        print("\n" + "=" * 70)
+        print(f"DONE. Points in collection: {info.points_count}")
+        print(f"Qdrant data: {config.QDRANT_PATH}")
+        print("=" * 70)
+    finally:
+        # Qdrant local mode keeps a lockfile: explicit close.
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
