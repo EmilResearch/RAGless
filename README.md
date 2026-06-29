@@ -15,7 +15,7 @@ The result is a system that is fast, deterministic, and hallucination-free by de
 | | RAG | RAGless |
 |---|---|---|
 | LLM at query time | ✅ Yes | ❌ No |
-| Hallucination risk | Present | None |
+| Hallucination risk at query time | Present | None |
 | Runtime cost | Per query | Zero |
 | Latency | Higher | Very low |
 | Answer predictability | Variable | Deterministic |
