@@ -23,6 +23,8 @@ The result is a system that is fast, deterministic, and hallucination-free by de
 
 RAGless is not a replacement for RAG in general. It is a better fit when your answers are known in advance and consistency matters more than flexibility — FAQ systems, internal documentation, product manuals, customer support.
 
+RAGless is also practical at scale: a single document can generate hundreds of Q&A pairs automatically, covering the full breadth of the source material — far beyond what a manually maintained static FAQ page could realistically handle.
+
 ---
 
 ## Features
