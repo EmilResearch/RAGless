@@ -1,7 +1,7 @@
 """
 prepare_data.py
 ---------------
-Script 1 — Data generation for the FAQ Retrieval system.
+Script 1 — Data generation for RAGless.
 
 Pipeline:
   1. Recursively scans the `source/` folder (pdf, txt, md).
@@ -351,7 +351,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print("=" * 70)
-    print("FAQ Retrieval — Script 1: prepare_data.py")
+    print("RAGless — Script 1: prepare_data.py")
     print(f"  LLM model     : {config.LLM_MODEL}")
     print(f"  Source dir    : {config.SOURCE_DIR}")
     print(f"  Output        : {config.DATA_JSON}")

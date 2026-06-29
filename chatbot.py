@@ -229,7 +229,7 @@ def main() -> None:
     args = parser.parse_args()
 
     print("=" * 70)
-    print("FAQ Retrieval — Script 3: chatbot.py")
+    print("RAGless — Script 3: chatbot.py")
     print(f"  Embedding model : {config.EMBEDDING_MODEL}")
     print(f"  Qdrant path     : {config.QDRANT_PATH}")
     print(f"  Collection      : {config.COLLECTION_NAME}")

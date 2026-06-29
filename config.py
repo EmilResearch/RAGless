@@ -1,7 +1,7 @@
 """
 config.py
 ---------
-Centralized configuration for the FAQ Retrieval System.
+Centralized configuration for RAGless.
 All "magic" constants of the system live here to make tuning and
 maintenance easier.
 """
@@ -27,7 +27,7 @@ EMBED_TASK_TYPE_QUERY = "RETRIEVAL_QUERY"
 # QDRANT (local embedded mode — no server, no Docker)
 # =============================================================================
 QDRANT_PATH = "./qdrant_data"
-COLLECTION_NAME = "faq_matching"
+COLLECTION_NAME = "qa_knowledge_base"
 
 # =============================================================================
 # CHUNKING & TOKEN BUDGET (Script 1 — prepare_data.py)

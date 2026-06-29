@@ -1,8 +1,8 @@
 # RAGless
 
-RAGless is a semantic FAQ retrieval system that answers questions **without using an LLM at runtime**.
+RAGless is a semantic retrieval system that answers questions **without using an LLM at runtime**.
 
-Most FAQ systems today are built on RAG: retrieve some context, send it to a language model, generate an answer. RAGless takes a different approach. During ingestion, an LLM converts your documents into curated Question & Answer pairs. At query time, the user's question is matched semantically against those pre-generated questions — and the corresponding answer is returned directly, with no generation step.
+Most Q&A systems today are built on RAG: retrieve some context, send it to a language model, generate an answer. RAGless takes a different approach. During ingestion, an LLM converts your documents into a comprehensive set of Question & Answer pairs — automatically covering the full breadth of the source material. At query time, the user's question is matched semantically against those pre-generated questions — and the corresponding answer is returned directly, with no generation step.
 
 The result is a system that is fast, deterministic, and hallucination-free by design.
 
@@ -19,19 +19,19 @@ The result is a system that is fast, deterministic, and hallucination-free by de
 | Runtime cost | Per query | Zero |
 | Latency | Higher | Very low |
 | Answer predictability | Variable | Deterministic |
-| Best for | Open-ended Q&A | FAQ / closed knowledge bases |
+| Best for | Open-ended Q&A | Closed knowledge bases |
 
-RAGless is not a replacement for RAG in general. It is a better fit when your answers are known in advance and consistency matters more than flexibility — FAQ systems, internal documentation, product manuals, customer support.
+RAGless is not a replacement for RAG in general. It is a better fit when your answers are known in advance and consistency matters more than flexibility — internal documentation, product manuals, customer support, policy documents.
 
-RAGless is also practical at scale: a single document can generate hundreds of Q&A pairs automatically, covering the full breadth of the source material — far beyond what a manually maintained static FAQ page could realistically handle.
+A single document can generate hundreds of Q&A pairs automatically, covering the full breadth of the source material. This is not about listing a handful of frequent questions — it is about making every piece of information in your documentation queryable.
 
 ---
 
 ## Features
 
-- Semantic FAQ retrieval using embeddings
+- Semantic retrieval using embeddings
 - No LLM required during user queries
-- Automatic FAQ generation from PDF, TXT and Markdown documents
+- Automatic Q&A generation from PDF, TXT and Markdown documents — full coverage of the source material
 - Multiple semantic question variants per answer (Q-Q matching)
 - Score aggregation by answer ID for more robust retrieval
 - Local Qdrant vector database (no server, no Docker)
@@ -50,7 +50,7 @@ Raw Documents
 prepare_data.py          ← LLM used here (ingestion only)
       │
       ▼
-Generated FAQ Blocks (data.json)
+Generated Q&A Blocks (data.json)
       │
       ▼
 ingest_to_qdrant.py      ← Embeddings generated here
@@ -119,7 +119,7 @@ Generate Question Variants
 (Optional) LLM-as-a-Judge
         │
         ▼
-Save FAQ Blocks (data.json)
+Save Q&A Blocks (data.json)
         │
         ▼
 Generate Embeddings
@@ -128,7 +128,7 @@ Generate Embeddings
 Store in Qdrant
 ```
 
-Each FAQ block contains: a unique ID, an answer, multiple semantic question variants, a category, the source file, and the source quote.
+Each Q&A block contains: a unique ID, an answer, multiple semantic question variants, a category, the source file, and the source quote.
 
 Every question variant gets its own embedding. This is the key to Q-Q matching.
 
@@ -212,7 +212,7 @@ With optional AI validation:
 python prepare_data.py --judge
 ```
 
-This reads every document, splits large files into chunks, generates FAQ blocks using Gemini, and saves everything to `data.json`.
+This reads every document, splits large files into chunks, generates Q&A blocks using Gemini, and saves everything to `data.json`.
 
 ### Step 2 — Build the vector database
 
@@ -296,7 +296,7 @@ Any embedding model exposed via Ollama or LM Studio works the same way. Just mak
 
 ## Output Files
 
-**`data.json`** — the generated FAQ knowledge base.
+**`data.json`** — the generated knowledge base: Q&A blocks covering the full source documentation.
 
 ```json
 {
@@ -319,7 +319,7 @@ Any embedding model exposed via Ollama or LM Studio works the same way. Just mak
 
 **Gemini lock-in.** Both the LLM (for ingestion) and the embedding model are Gemini-based. Switching provider requires updating `config.py` and re-running the full ingestion pipeline. There is no provider abstraction layer.
 
-**Quality depends on ingestion.** The retrieval is only as good as the FAQ blocks generated in Step 1. There is no built-in evaluation tool to measure how well the generated questions cover the source documents. If you want to validate quality, sample `data.json` manually after ingestion.
+**Quality depends on ingestion.** The retrieval is only as good as the Q&A blocks generated in Step 1. There is no built-in evaluation tool to measure how well the generated questions cover the source documents. If you want to validate quality, sample `data.json` manually after ingestion.
 
 **Local Qdrant limitations.** RAGless uses Qdrant in embedded mode (no server required). This works well for single-process use cases up to tens of thousands of FAQ entries. For concurrent access or larger collections, migrate to a Qdrant server instance and update `QDRANT_PATH` in `config.py` to a URL.
 

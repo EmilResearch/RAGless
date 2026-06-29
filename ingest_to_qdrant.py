@@ -181,7 +181,7 @@ def upsert_points(client: QdrantClient, rows: list[dict], vectors: list[list[flo
 # -----------------------------------------------------------------------------
 def main() -> None:
     print("=" * 70)
-    print("FAQ Retrieval — Script 2: ingest_to_qdrant.py")
+    print("RAGless — Script 2: ingest_to_qdrant.py")
     print(f"  Embedding model : {config.EMBEDDING_MODEL}")
     print(f"  Vector size     : {config.VECTOR_SIZE}")
     print(f"  Qdrant path     : {config.QDRANT_PATH}")
