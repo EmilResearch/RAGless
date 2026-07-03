@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import random
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -136,11 +137,11 @@ def answer_query(
     threshold: float,
     debug: bool = False,
 ) -> None:
-    """Run retrieval + aggregation and print the answer."""
+    """Run retrieval + aggregation and print up to the top 3 best answers."""
     try:
         qvec = embed_query(query)
     except Exception as e:
-        print(f"[ERROR] Embedding failed: {e}")
+        print(f"\n[ERROR] Embedding failed: {e}")
         return
 
     try:
@@ -151,7 +152,7 @@ def answer_query(
             with_payload=True,
         ).points
     except Exception as e:
-        print(f"[ERROR] Qdrant query failed: {e}")
+        print(f"\n[ERROR] Qdrant query failed: {e}")
         return
 
     if not results:
@@ -160,54 +161,57 @@ def answer_query(
         return
 
     agg = aggregate_scores(results)
-    if not agg:
-        print("\nI couldn't find any relevant information.")
-        log_missed_query(query, 0.0)
-        return
-
-    # Winner = answer_id with the highest AGGREGATED score.
-    winner_id, winner = max(agg.items(), key=lambda kv: kv[1]["score"])
-    top_agg_score = winner["score"]
-    top_single_score = winner["best_single_score"]
-
+    
+    # --- DEBUG: Top-K matches ---
     if debug:
         print("\n--- DEBUG TOP-K ---")
         for r in results:
             payload = r.payload or {}
             print(f"  score={r.score:.4f}  aid={payload.get('answer_id')}  q={payload.get('question_text')}")
-        print("--- DEBUG AGG ---")
-        for aid, b in sorted(agg.items(), key=lambda kv: -kv[1]["score"]):
-            print(f"  aid={aid}  agg={b['score']:.4f}  hits={b['hits']}  best_single={b['best_single_score']:.4f}")
-        print("-------------------")
 
-    # Threshold check.
-    # Primary gate: aggregated score must clear `threshold`.
-    # Fallback: a very strong single hit (>= SINGLE_HIT_THRESHOLD) also passes,
-    # so we don't reject a clearly-correct answer just because only one of its
-    # question variants made it into the top-K.
-    passes_agg = top_agg_score >= threshold
-    passes_single = top_single_score >= config.SINGLE_HIT_THRESHOLD
+    if not agg:
+        print("\nI couldn't find any relevant information.")
+        log_missed_query(query, 0.0)
+        return
 
-    if not (passes_agg or passes_single):
+    # --- LOGIC: Filter and sort candidates ---
+    candidates = []
+    for aid, b in agg.items():
+        passes_agg = b["score"] >= threshold
+        passes_single = b["best_single_score"] >= config.SINGLE_HIT_THRESHOLD
+        min_quality = b["best_single_score"] > 0.68
+        
+        if (passes_agg or passes_single) and min_quality:
+            candidates.append((aid, b))
+
+    if not candidates:
         print("\nI couldn't find any relevant information on this topic in my knowledge base.")
+        top_agg_score = max(b["score"] for b in agg.values())
         log_missed_query(query, top_agg_score)
         return
 
-    block = answers_dict.get(winner_id)
-    if not block:
-        # Pathological case: the answer_id stored in Qdrant no longer exists in data.json.
-        print("\n[WARN] answer_id not found in the document store. Re-run the ingestion.")
-        log_missed_query(query, top_agg_score)
-        return
+    candidates.sort(key=lambda x: x[1]["score"], reverse=True)
+    top_candidates = candidates[:3]
 
-    print("\n" + "─" * 70)
-    print(block["answer"])
-    print("─" * 70)
-    print(f"Source: {block.get('source_file', 'n/a')}")
+    print(f"\n[INFO] Found {len(candidates)} relevant answers, showing top {len(top_candidates)}:")
+
+    for i, (aid, stats) in enumerate(top_candidates, 1):
+        block = answers_dict.get(aid)
+        if not block:
+            continue
+            
+        print("\n" + "─" * 70)
+        print(f"--- Answer {i} (Pertinence: {stats['score']:.2f}) ---")
+        print(block["answer"])
+        print("─" * 70)
+        print(f"Source: {block.get('source_file', 'n/a')}")
+
+    # --- DEBUG: Aggregation table ---
     if debug:
-        print(f"[debug] agg_score={top_agg_score:.4f}  hits={winner['hits']}  "
-              f"best_single={top_single_score:.4f}  passed_via="
-              f"{'agg' if passes_agg else 'single'}")
+        print(f"\n[debug] Displayed {len(top_candidates)} answers out of {len(candidates)} found.")
+        print("--- DEBUG AGG (All candidates) ---")
+        for aid, b in candidates:
+            print(f"  aid={aid}  agg={b['score']:.4f}  hits={b['hits']}  best_single={b['best_single_score']:.4f}")
 
 
 # -----------------------------------------------------------------------------
@@ -236,10 +240,10 @@ def main() -> None:
     print(f"  Top-K           : {config.TOP_K_RETRIEVAL}")
     print(f"  Threshold (agg) : {args.threshold}")
     print(f"  Threshold (sgl) : {config.SINGLE_HIT_THRESHOLD}")
-    print(f"  Debug           : {args.debug}")
+    print(f"  Debug           : {args.debug} ( Use --debug flag to see scores and aggregation details. )")
     print("=" * 70)
     print("Type your question. Type 'exit' or 'quit' to leave.\n")
-
+    
     answers_dict = load_answers_dict(config.DATA_JSON)
     client = QdrantClient(path=config.QDRANT_PATH)
 
@@ -256,6 +260,15 @@ def main() -> None:
             pass
         sys.exit(1)
 
+    all_questions = [q for block in answers_dict.values() for q in block.get("questions", [])]
+    if all_questions:
+        sample_size = min(10, len(all_questions))
+        examples = random.sample(all_questions, sample_size)
+        print("💡 Here are some example questions you can ask me::")
+        for q in examples:
+            print(f"  • {q}")
+        print()
+                
     try:
         while True:
             try:

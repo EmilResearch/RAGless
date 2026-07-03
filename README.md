@@ -345,4 +345,4 @@ Any embedding model exposed via Ollama or LM Studio works the same way. Just mak
 
 ## License
 
-Apache 2.0 License.
+AGPLv3 License.

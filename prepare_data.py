@@ -69,18 +69,20 @@ Strictly follow these guidelines:
    - "source_quote": The EXACT sentence or paragraph from which you extracted the answer (copied literally).
 3. ISOLATION: Answers must not require reading the rest of the document.
 4. DO NOT HALLUCINATE: Extract only information explicitly written. If the text is vague, ignore it.
+5. LANGUAGE: Keep all JSON keys exactly as requested (in English). Generate all values ("answer", "questions", "category") in the EXACT SAME LANGUAGE as the provided text. Do not translate the content.
 
 Generate the output EXCLUSIVELY in JSON format (an object with key "blocks" containing the array of blocks):
 {
   "blocks": [
     {
-      "answer": "Full text...",
-      "questions": ["Question 1?", "Question 2?", "Question 3?"],
-      "category": "Category Name",
-      "source_quote": "Literal text from the document..."
+      "answer": "[Comprehensive text in the source document's language...]",
+      "questions": ["[Question 1 in source language?]", "[Question 2 in source language?]", "[Question 3 in source language?]"],
+      "category": "[Short category in source language]",
+      "source_quote": "[Literal text from the document...]"
     }
   ]
 }
+
 
 Here is the content to process:
 """

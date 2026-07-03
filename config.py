@@ -45,12 +45,12 @@ OVERLAP = 500
 TOP_K_RETRIEVAL = 10
 
 # Minimum *aggregated* score required to consider the answer reliable (OOD guard).
-DEFAULT_THRESHOLD = 0.70
+DEFAULT_THRESHOLD = 1.35
 
 # Fallback threshold on the *best single* hit score. If the aggregated score is
 # below DEFAULT_THRESHOLD but a single variant matches strongly, we still answer.
 # This avoids false negatives when only one question variant of an answer matches.
-SINGLE_HIT_THRESHOLD = 0.82
+SINGLE_HIT_THRESHOLD = 0.75
 
 # =============================================================================
 # EMBEDDING BATCHING (Script 2 — ingest_to_qdrant.py)
