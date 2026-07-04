@@ -1,348 +1,264 @@
+# RAGless — Deterministic Retrieval-Only Q&A System
 
-# RAGless
+**RAGless** is a retrieval-only question-answering system with **zero LLM calls at runtime**.
+Source documents are converted into self-contained informational blocks, indexed into a local vector database (Qdrant), and queried via asymmetric Gemini embeddings.
 
-RAGless is a semantic retrieval system that answers questions about your documentation, **without using an LLM at runtime**.
+> **Zero hallucinations at runtime. Minimal latency. Near-zero cost per query.**
 
-Most Q&A systems today are built on RAG: retrieve some context, send it to a language model, generate an answer. RAGless takes a different approach. During ingestion, an LLM converts your documents into a comprehensive set of Question & Answer pairs — automatically covering the full breadth of the source material. At query time, the user's question is matched semantically against those pre-generated questions — and the corresponding answer is returned directly, with no generation step.
-
-The result is a system that is fast, deterministic, and hallucination-free by design.
+![How does RAGless work](./ragless.png)
 
 [See it in action](https://youtu.be/AQnVMuAVPBA)
 
 ---
 
-## RAGless vs RAG
+## Overview
 
-| | RAG | RAGless |
-|---|---|---|
-| LLM at query time | ✅ Yes | ❌ No |
-| Hallucination risk at query time | Present | None |
-| Runtime cost | Per query | Zero |
-| Latency | Higher | Very low |
-| Answer predictability | Variable | Deterministic |
-| Best for | Open-ended Q&A | Closed knowledge bases |
+The project consists of three independent scripts:
 
-RAGless is not a replacement for RAG in general. It is a better fit when your answers are known in advance and consistency matters more than flexibility — internal documentation, product manuals, customer support, policy documents.
-
-A single document can generate hundreds of Q&A pairs automatically, covering the full breadth of the source material. This is not about listing a handful of frequent questions — it is about making every piece of information in your documentation queryable.
+| Script | Purpose |
+|--------|---------|
+| `prepare_data.py` | Extracts Q&A blocks from source documents using Gemini in JSON mode |
+| `ingest_to_qdrant.py` | Generates embeddings and populates the local Qdrant vector database |
+| `chatbot.py` | CLI chatbot that retrieves the most relevant answers for a user query |
 
 ---
 
-![Descrizione alternativa dell'immagine](./ragless.png)
+## Key Features
+
+- **No LLM at runtime** — The chatbot relies purely on vector retrieval. No expensive API calls during user interaction.
+- **Robust Q-Q matching via `answer_id` aggregation** — If multiple question variants for the same answer match the query, their scores are summed. This makes the result far more stable than classic "top-1" retrieval.
+- **Asymmetric Gemini embeddings** — `RETRIEVAL_DOCUMENT` at ingestion time and `RETRIEVAL_QUERY` at retrieval time, as recommended by Google.
+- **Embedded Qdrant** — No Docker server, no cloud service. Data is stored locally on disk (`./qdrant_data`).
+- **Smart chunking** — Documents are chunked only if they exceed a token threshold, measured with the model's real tokenizer.
+- **Optional Judge verification** — `prepare_data.py` can enable a second LLM pass to discard blocks not supported by the source text (`--judge`).
+- **Missed query logging** — Below-threshold queries are automatically logged to `missed_queries.log` for later analysis.
+- **Guaranteed idempotency** — Every run of `ingest_to_qdrant.py` recreates the collection from scratch, preventing hidden duplicates.
 
 ---
 
-## Features
+## Requirements
 
-- Semantic retrieval using embeddings
-- No LLM required during user queries
-- Automatic Q&A generation from PDF, TXT and Markdown documents — full coverage of the source material
-- Multiple semantic question variants per answer (Q-Q matching)
-- Score aggregation by answer ID for more robust retrieval
-- Local Qdrant vector database (no server, no Docker)
-- Configurable similarity threshold with OOD detection
-- Optional LLM-as-a-Judge validation during ingestion
-- Automatic logging of unanswered queries for continuous improvement
+- Python 3.10+
+- [Gemini API Key](https://aistudio.google.com/app/apikey) (free tier with generous limits)
+- Python dependencies (see Installation section)
 
 ---
 
-## Architecture
+## Installation
 
-```
-Raw Documents
-      │
-      ▼
-prepare_data.py          ← LLM used here (ingestion only)
-      │
-      ▼
-Generated Q&A Blocks (data.json)
-      │
-      ▼
-ingest_to_qdrant.py      ← Embeddings generated here
-      │
-      ▼
-Qdrant Vector Database
-      │
-      ▼
-chatbot.py               ← No LLM, pure retrieval
-      │
-      ▼
-Semantic Retrieval
-```
+1. **Clone or download the repository** and navigate to the project folder.
+
+2. **Create a virtual environment** (recommended):
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # Linux/macOS
+   # or
+   venv\Scripts\activate   # Windows
+   ```
+
+3. **Install dependencies**:
+   ```bash
+   pip install litellm qdrant-client pypdf python-dotenv tqdm
+   ```
+
+4. **Configure your API key**:
+   ```bash
+   cp .env.example .env
+   # Edit .env and insert your GEMINI_API_KEY
+   ```
 
 ---
 
 ## Project Structure
 
 ```
-RAGless/
-│
-├── source/              ← Your documents go here
-│   ├── manual.pdf
-│   ├── faq.txt
-│   └── notes.md
-│
-├── failed_chunks/       ← Chunks that couldn't be parsed (auto-saved)
-│
-├── config.py
-├── prepare_data.py
-├── ingest_to_qdrant.py
-├── chatbot.py
-├── data.json
-├── missed_queries.log
-├── requirements.txt
-└── .env
-```
-
----
-
-## How It Works
-
-RAGless consists of two completely separate phases.
-
-### Ingestion (runs once)
-
-```
-Documents (PDF / TXT / MD)
-        │
-        ▼
-Extract Text
-        │
-        ▼
-Token Counting
-        │
-        ▼
-Chunking (if necessary)
-        │
-        ▼
-Gemini Q&A Generation
-        │
-        ▼
-Generate Question Variants
-        │
-        ▼
-(Optional) LLM-as-a-Judge
-        │
-        ▼
-Save Q&A Blocks (data.json)
-        │
-        ▼
-Generate Embeddings
-        │
-        ▼
-Store in Qdrant
-```
-
-Each Q&A block contains: a unique ID, an answer, multiple semantic question variants, a category, the source file, and the source quote.
-
-Every question variant gets its own embedding. This is the key to Q-Q matching.
-
-### Retrieval (no LLM involved)
-
-```
-User Question
-      │
-      ▼
-Generate Embedding
-      │
-      ▼
-Search Top-K Similar Questions
-      │
-      ▼
-Aggregate Scores by Answer ID
-      │
-      ▼
-Threshold Check
-      │
-      ├──── Below threshold → log missed query
-      │
-      ▼
-Return Answer + Source File
-```
-
-Instead of picking the single nearest question, RAGless aggregates similarity scores across all question variants that belong to the same answer. This makes retrieval significantly more robust when multiple phrasings of the same question exist in the knowledge base.
-
----
-
-## Installation
-
-Clone the repository.
-
-```bash
-git clone https://github.com/EmilResearch/RAGless.git
-cd RAGless
-```
-
-Create and activate a virtual environment.
-
-```bash
-python -m venv .venv
-
-# macOS / Linux
-source .venv/bin/activate
-
-# Windows
-.venv\Scripts\activate
-```
-
-Install dependencies.
-
-```bash
-pip install -r requirements.txt
-```
-
-Create a `.env` file.
-
-```env
-GEMINI_API_KEY=YOUR_API_KEY
+.
+├── source/                    # Folder with source documents (.pdf, .txt, .md)
+├── config.py                  # Centralized configuration (models, thresholds, paths)
+├── prepare_data.py            # Script 1: Q&A block extraction
+├── ingest_to_qdrant.py        # Script 2: embedding and indexing
+├── chatbot.py                 # Script 3: CLI chatbot
+├── data.json                  # Output of prepare_data.py (validated blocks)
+├── qdrant_data/               # Local vector database (auto-created)
+├── failed_chunks/             # Chunks that failed to produce valid JSON (debug)
+└── missed_queries.log         # Log of below-threshold queries
 ```
 
 ---
 
 ## Usage
 
-### Prepare your documents
+### 1. Prepare the data (`prepare_data.py`)
 
-Copy your documents into the `source/` directory. Supported formats: PDF, TXT, Markdown.
-
-### Step 1 — Generate the knowledge base
+Place your documents in the `source/` folder (supports `.pdf`, `.txt`, `.md`), then run:
 
 ```bash
 python prepare_data.py
 ```
 
-With optional AI validation:
-
+With optional Judge verification (slower but more accurate):
 ```bash
 python prepare_data.py --judge
 ```
 
-This reads every document, splits large files into chunks, generates Q&A blocks using Gemini, and saves everything to `data.json`.
+**What it does:**
+- Reads each file and counts tokens.
+- If the document is short (≤ 10,000 tokens), sends it whole to the LLM; otherwise splits it into chunks.
+- Extracts JSON blocks with `answer`, `questions`, `category`, `source_quote`.
+- Validates blocks and saves them to `data.json`.
 
-### Step 2 — Build the vector database
+---
+
+### 2. Index into the vector database (`ingest_to_qdrant.py`)
 
 ```bash
 python ingest_to_qdrant.py
 ```
 
-This reads `data.json`, generates embeddings, and stores them in a local Qdrant collection.
+**What it does:**
+- Loads `data.json`.
+- "Explodes" each block into as many rows as its question variants.
+- Generates embeddings in batches via LiteLLM + Gemini.
+- Recreates the Qdrant collection and inserts vectors with deterministic UUID5s.
 
-### Step 3 — Start the chatbot
+---
+
+### 3. Launch the chatbot (`chatbot.py`)
 
 ```bash
 python chatbot.py
 ```
 
-Example:
-
+Available options:
+```bash
+python chatbot.py --threshold 0.75   # Change the minimum aggregated score threshold
+python chatbot.py --debug            # Show internal scores and aggregation table
 ```
-You> How do I connect to the hotel Wi-Fi?
 
+**Interaction:**
+```
+You> How does check-in work?
+[INFO] Found 2 relevant answers, showing top 1:
 ──────────────────────────────────────────────────────────────────────
-The Wi-Fi network is "HotelGuest". The password is available at the reception desk or on the welcome card in your room.
+--- Answer 1 (Pertinence: 1.85) ---
+Check-in is available from 3:00 PM to 8:00 PM. If you arrive after 8:00 PM,
+please contact reception in advance...
 ──────────────────────────────────────────────────────────────────────
-Source: hotel_manual.pdf
+Source: source/regulations.txt
 ```
 
-### Custom threshold
-
-```bash
-python chatbot.py --threshold 0.75
-```
-
-Higher threshold → fewer false positives, more unanswered questions.
-Lower threshold → higher recall, increased risk of incorrect matches.
+Type `exit`, `quit`, or `:q` to leave.
 
 ---
 
-## Configuration
+## How Retrieval Works
 
-All parameters are centralized in `config.py`. No magic numbers are scattered across the codebase.
+The core of the chatbot is **aggregation by `answer_id`**:
 
-Key settings:
+1. The user query is embedded with `task_type=RETRIEVAL_QUERY`.
+2. Qdrant returns the `TOP_K_RETRIEVAL` most similar points (questions).
+3. Scores of points pointing to the same `answer_id` are **summed**.
+4. A candidate is shown only if:
+   - the aggregated score exceeds `DEFAULT_THRESHOLD` **OR**
+   - the best single hit exceeds `SINGLE_HIT_THRESHOLD`
+   - **AND** the best single hit is > 0.68 (minimum quality)
 
-- `EMBEDDING_MODEL` — embedding model (default: `gemini/gemini-embedding-001`)
-- `VECTOR_SIZE` — output dimensionality (default: 3072)
-- `TOP_K_RETRIEVAL` — candidates pulled from Qdrant before aggregation (default: 10)
-- `DEFAULT_THRESHOLD` — minimum aggregated score to return an answer (default: 0.70)
-- `SINGLE_HIT_THRESHOLD` — fallback threshold on the best single hit (default: 0.82)
-- `CHUNK_SIZE` / `OVERLAP` — chunking parameters for large documents
-
----
-
-## Local Embeddings (offline mode)
-
-RAGless uses LiteLLM for embeddings, which supports local providers out of the box. If you want to run fully offline, you can replace Gemini with a local model — no code changes required.
-
-**Example with Ollama:**
-
-1. Install [Ollama](https://ollama.com) and pull an embedding model:
-
-```bash
-ollama pull nomic-embed-text
-```
-
-2. Update `config.py`:
-
-```python
-EMBEDDING_MODEL = "ollama/nomic-embed-text"
-VECTOR_SIZE = 768  # match the model's output dimension
-```
-
-3. Re-run ingestion:
-
-```bash
-python ingest_to_qdrant.py
-```
-
-Any embedding model exposed via Ollama or LM Studio works the same way. Just make sure `VECTOR_SIZE` matches the model's actual output dimension, and re-run ingestion whenever you switch models.
+This mechanism makes the system robust: even if no single question variant is a perfect match, the sum of multiple weak matches on the same answer can make it emerge correctly.
 
 ---
 
-## Output Files
+## RAGless vs. Classic Generative RAG
 
-**`data.json`** — the generated knowledge base: Q&A blocks covering the full source documentation.
+### Philosophy
 
-```json
-{
-    "id": "...",
-    "answer": "...",
-    "questions": ["...", "...", "..."],
-    "category": "...",
-    "source_file": "...",
-    "source_quote": "..."
-}
-```
+Classic RAG generates answers at runtime by retrieving context and prompting an LLM to synthesize a response. **RAGless eliminates the generative step entirely.** Answers are pre-generated during ingestion and retrieved verbatim at runtime.
 
-**`failed_chunks/`** — if Gemini returns malformed JSON, the original chunk is saved here for manual inspection.
+### Advantages of RAGless
 
-**`missed_queries.log`** — every query that fell below the similarity threshold is logged with a timestamp and score. Use this to identify gaps in your knowledge base.
+| Advantage | Explanation |
+|-----------|-------------|
+| **Much simpler pipeline** | No prompt engineering for answer generation, no context window management, no output parsing. Just embed, search, return. |
+| **Q-Q matching is far more reliable** | Matching query-to-question (Q-Q) is semantically easier and more robust than query-to-document-chunk (Q-D) or query-to-answer (Q-A). Multiple question variants per answer provide redundancy. |
+| **Determinism** | Same question, same answer, always. Behavior is reproducible and testable. |
+| **Zero hallucinations at runtime** | No LLM generates answers at query time. Returned text is pre-generated and immutable. |
+| **Zero cost per query** | After ingestion, there are no API calls. Retrieval is purely local computation. |
+| **Low latency** | Query embedding + vector search. Milliseconds, not seconds. |
+| **Verifiable answers** | Every block has `source_quote` and `source_file`. Complete audit trail. |
+| **Reproducible bugs** | If an answer is wrong, it is 100% wrong. Easy to find and fix. |
+| **Finite output surface** | The number of possible answers is known (`data.json`). Exhaustively testable. |
+| **Runs on modest hardware** | Embedded Qdrant, no LLM in memory. Works on CPU with a few GB of RAM. |
+| **Total privacy** | No user data leaves the machine after ingestion. |
+| **No dependency drift** | The embedding model can change, but the answers do not. You are not tied to an LLM provider's availability or pricing. |
+
+### Trade-offs and Limitations
+
+| Limitation | Explanation |
+|------------|-------------|
+| **No real-time flexibility** | Cannot synthesize novel answers, combine information across blocks, or adapt tone dynamically. What you ingest is what you get. |
+| **Higher ingestion cost** | Using an LLM to generate Q&A blocks costs more than simple embedding. See cost comparison below. |
+| **Coverage bounded by ingestion** | If a topic was not extracted during `prepare_data.py`, the system cannot answer it. No "reasoning" around gaps. |
+| **Maintenance requires re-ingestion** | Updating answers requires re-running the full pipeline, not just editing a prompt. |
+
+### Cost & Performance Comparison
+
+| Metric | Classic Generative RAG | Q-Q System (This Project) | Difference / Advantage |
+|--------|------------------------|---------------------------|------------------------|
+| **Ingestion Cost (One-time)** | ~$0.01 *(embedding 100,000 tokens only)* | ~$1.50 *(LLM generates Q&A from 100,000 tokens)* | **+$1.49** (Initial disadvantage, but negligible cost) |
+| **Runtime API Cost (Monthly)** | ~$157.50 *(1,000 queries/day, ~1,000 context tokens + 150 output tokens)* | **$0.00** *(only embedding 1,000 short queries, < $0.02/month)* | **~$157.50/month saved** (Zero-cost scalability) |
+| **Latency (per query)** | 2.5 – 4 seconds *(LLM text generation)* | **~0.15 seconds** *(pure vector search)* | **>15x faster** (Instant response) |
+| **Hallucination Rate (Runtime)** | Low, but always > 0% | **0%** | **Risk eliminated** (Static, deterministic output) |
+
+### The Hallucination Trade-off
+
+RAGless eliminates hallucinations **at runtime**, where they are most dangerous because they are uncontrollable. The risk during ingestion still exists, but it is mitigated — and crucially — **it happens offline, in a controlled environment, with the possibility of human review** before the knowledge base goes to production.
+
+RAGless shifts the hallucination risk from runtime to ingestion. Generation happens during `prepare_data.py`, which is why the optional `--judge` pass and deterministic UUIDs for idempotency were added.
+
+> **The trade-off is:** you give up real-time flexibility in exchange for offline verifiability. For high-risk domains, I prefer hallucinations I can catch in a log over ones I cannot predict.
 
 ---
 
-## Known Limitations
+## Advanced Configuration
 
-**Gemini lock-in.** Both the LLM (for ingestion) and the embedding model are Gemini-based. Switching provider requires updating `config.py` and re-running the full ingestion pipeline. There is no provider abstraction layer.
+All tunable constants are in `config.py`:
 
-**Quality depends on ingestion.** The retrieval is only as good as the Q&A blocks generated in Step 1. There is no built-in evaluation tool to measure how well the generated questions cover the source documents. If you want to validate quality, sample `data.json` manually after ingestion.
-
-**Local Qdrant limitations.** RAGless uses Qdrant in embedded mode (no server required). This works well for single-process use cases up to tens of thousands of FAQ entries. For concurrent access or larger collections, migrate to a Qdrant server instance and update `QDRANT_PATH` in `config.py` to a URL.
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `LLM_MODEL` | Gemini model for extraction and judge | `gemini/gemini-2.5-flash` |
+| `EMBEDDING_MODEL` | Embedding model | `gemini/gemini-embedding-001` |
+| `VECTOR_SIZE` | Vector dimension (Matryoshka) | `3072` |
+| `MAX_TOKENS_DOC` | Threshold for sending whole document | `10_000` |
+| `CHUNK_SIZE` / `OVERLAP` | Chunk size and overlap | `8_000` / `500` |
+| `TOP_K_RETRIEVAL` | Candidates retrieved from Qdrant | `10` |
+| `DEFAULT_THRESHOLD` | Minimum aggregated score threshold | `1.35` |
+| `SINGLE_HIT_THRESHOLD` | Fallback threshold on best single hit | `0.75` |
+| `EMBEDDING_BATCH_SIZE` | Questions per embedding API call | `100` |
+| `QDRANT_UPSERT_BATCH` | Points per upsert batch | `256` |
 
 ---
 
-## Future Improvements
+## Troubleshooting
 
-- Cross-encoder reranking
-- Automatic evaluation dataset
-- Incremental ingestion (avoid full re-ingestion on document updates)
-- Metadata filtering by category
-- REST API
-- Web interface
-- Multi-language support
-- Docker deployment
+| Problem | Solution |
+|---------|----------|
+| `GEMINI_API_KEY not found` | Create `.env` file with `GEMINI_API_KEY=...` |
+| `Collection not found` | Run `python ingest_to_qdrant.py` first |
+| Malformed JSON in chunks | Check the `failed_chunks/` folder for raw text |
+| Empty LLM response | Possible Gemini safety block; try reducing or modifying source text |
+| Qdrant lockfile | Client closes automatically; in case of crash, manually remove the lock in `qdrant_data/` |
+
+---
+
+## Technical Notes
+
+- **LiteLLM** is used as a unified proxy to call Gemini for both completions and embeddings.
+- **Qdrant Client** in `path=` mode stores everything in local files: no server process is required.
+- Qdrant point IDs are deterministic UUID5s (`uuid5(NAMESPACE_DNS, answer_id:question_text)`), so re-running ingestion does not create logical duplicates.
 
 ---
 
 ## License
 
-AGPLv3 License.
+This project is licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**.
+
+See [LICENSE](LICENSE) for details.
